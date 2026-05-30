@@ -184,7 +184,8 @@ services:
       # DMS
       AISERVICECLIENT_URL: http://dms:8086
       # Keycloak — split issuer-uri (iss claim match) vs jwk-set-uri (key fetch) (ADR-0006)
-      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8180/realms/intelligent-content-management
+      # KC_HOSTNAME_PORT is ignored by Keycloak 26; tokens carry iss: localhost:8080 regardless of external port
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8080/realms/intelligent-content-management
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/intelligent-content-management/protocol/openid-connect/certs
       # Disable Spring Boot's embedded compose self-launch (no docker socket in container)
       SPRING_DOCKER_COMPOSE_ENABLED: "false"

@@ -17,6 +17,7 @@ services:
     volumes:
       - db-data:/var/lib/postgresql/data
       - ./infra/db-postgres/1_docker_postgres_initialisation.sh:/docker-entrypoint-initdb.d/1_docker_create_multiple_databases_and_users.sh
+      - ./infra/db-postgres/2_create_schemas.sh:/docker-entrypoint-initdb.d/2_create_schemas.sh
     environment:
       POSTGRES_EXTRA_DATABASES: dms_db
       POSTGRES_PASSWORD: toor
@@ -94,10 +95,11 @@ services:
     networks:
       - backend
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8080/realms/intelligent-content-management/.well-known/openid-configuration > /dev/null"]
+      test: ["CMD", "/opt/keycloak/bin/kc.sh", "show-config"]
       interval: 15s
       timeout: 10s
-      retries: 10
+      retries: 12
+      start_period: 60s
 
   # ---------------------------------------------------------------------------
   # Ollama — containerised LLM runtime (ADR-0006)
@@ -115,7 +117,7 @@ services:
         aliases:
           - ollama
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/version > /dev/null"]
+      test: ["CMD-SHELL", "ollama list > /dev/null 2>&1"]
       interval: 10s
       timeout: 5s
       retries: 6

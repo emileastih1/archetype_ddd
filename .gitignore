@@ -1,0 +1,18 @@
+# Nested bounded-context repos — each has its own git history
+intelligent_content_management/
+dms/
+
+# Other existing projects in this folder that are not part of this orchestration
+AIDocumentLibraryChat/
+MAVEN_WAR_HELLO_WORLD/
+domain.driver/
+domain.driver.zip
+postgres/
+spring-ai-rag-example/
+
+# Env secrets
+.env
+
+# OS
+.DS_Store
+Thumbs.db

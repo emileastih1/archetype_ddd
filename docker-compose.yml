@@ -1,0 +1,252 @@
+# =============================================================================
+# Global compose — starts all three apps + every dependency (ADR-0006)
+# Run: docker compose up --build
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Infrastructure
+  # ---------------------------------------------------------------------------
+
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: icm-db
+    ports:
+      - '5434:5432'
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./infra/db-postgres/1_docker_postgres_initialisation.sh:/docker-entrypoint-initdb.d/1_docker_create_multiple_databases_and_users.sh
+    environment:
+      POSTGRES_EXTRA_DATABASES: dms_db
+      POSTGRES_PASSWORD: toor
+      POSTGRES_DB: doc_management_db
+      POSTGRES_USER: postgres
+    networks:
+      backend:
+        aliases:
+          - database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4:8.0
+    container_name: icm-pgadmin
+    ports:
+      - '8088:80'
+    environment:
+      PGADMIN_DEFAULT_EMAIL: emileastih1@gmail.com
+      PGADMIN_DEFAULT_PASSWORD: toor
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    networks:
+      - backend
+    depends_on:
+      db:
+        condition: service_healthy
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.0.0
+    container_name: icm-elasticsearch
+    ports:
+      - '9200:9200'
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    environment:
+      discovery.type: single-node
+      node.name: elasticsearch01
+      bootstrap.memory_lock: "true"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+      xpack.security.enabled: "false"
+    deploy:
+      resources:
+        limits:
+          memory: 1GB
+    networks:
+      backend:
+        aliases:
+          - elasticsearch
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(green|yellow)\"'"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0.0
+    container_name: icm-keycloak
+    command: start-dev --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      # Pin hostname so tokens always carry iss: http://localhost:8180/... (ADR-0006)
+      KC_HOSTNAME: localhost
+      KC_HOSTNAME_PORT: "8180"
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+    ports:
+      - '8180:8080'
+    volumes:
+      - ./infra/keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/realms/intelligent-content-management/.well-known/openid-configuration > /dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Ollama — containerised LLM runtime (ADR-0006)
+  # ---------------------------------------------------------------------------
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: icm-ollama
+    ports:
+      - '11434:11434'
+    volumes:
+      - ollama-models:/root/.ollama
+    networks:
+      backend:
+        aliases:
+          - ollama
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/version > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: icm-ollama-init
+    volumes:
+      - ollama-models:/root/.ollama
+    networks:
+      - backend
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c",
+      "OLLAMA_HOST=http://ollama:11434 ollama pull gemma3:4b && OLLAMA_HOST=http://ollama:11434 ollama pull mxbai-embed-large"]
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Applications
+  # ---------------------------------------------------------------------------
+
+  dms:
+    build:
+      context: ./dms
+      dockerfile: Dockerfile
+    container_name: icm-dms
+    ports:
+      - '8086:8086'
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://database:5432/dms_db?currentSchema=vectorcontent
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: toor
+      AI_CLIENT_OLLAMA_BASE_URL: http://ollama:11434
+      SPRING_DOCKER_COMPOSE_ENABLED: "false"
+    networks:
+      - backend
+    depends_on:
+      db:
+        condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8086/AiServiceClient/swagger-ui.html > /dev/null || curl -sf http://localhost:8086/AiServiceClient/actuator/health > /dev/null || exit 0"]
+      interval: 20s
+      timeout: 10s
+      retries: 8
+      start_period: 60s
+
+  icm:
+    build:
+      context: ./intelligent_content_management
+      dockerfile: Dockerfile
+    container_name: icm-app
+    ports:
+      - '8085:8085'
+    environment:
+      # Database
+      SPRING_DATASOURCE_URL: jdbc:postgresql://database:5432/doc_management_db?currentSchema=documentcontent
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: toor
+      # Elasticsearch
+      SPRING_ELASTICSEARCH_URIS: http://elasticsearch:9200
+      # DMS
+      AISERVICECLIENT_URL: http://dms:8086
+      # Keycloak — split issuer-uri (iss claim match) vs jwk-set-uri (key fetch) (ADR-0006)
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8180/realms/intelligent-content-management
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/intelligent-content-management/protocol/openid-connect/certs
+      # Disable Spring Boot's embedded compose self-launch (no docker socket in container)
+      SPRING_DOCKER_COMPOSE_ENABLED: "false"
+    networks:
+      - backend
+    depends_on:
+      db:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      dms:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8085/idm/swagger-ui.html > /dev/null || curl -sf http://localhost:8085/idm/actuator/health > /dev/null || exit 0"]
+      interval: 20s
+      timeout: 10s
+      retries: 8
+      start_period: 90s
+
+  frontend:
+    build:
+      context: ./intelligent_content_management/frontend
+      dockerfile: Dockerfile
+    container_name: icm-frontend
+    ports:
+      - '3000:3000'
+    environment:
+      NODE_ENV: production
+      ICM_BASE_URL: http://icm:8085/idm/api
+      KC_TOKEN_URL: http://keycloak:8080/realms/intelligent-content-management/protocol/openid-connect/token
+      KC_CLIENT_ID: icm-bff
+      KC_CLIENT_SECRET: icm-bff-secret
+    networks:
+      - backend
+    depends_on:
+      icm:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000 > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+# =============================================================================
+# Volumes
+# =============================================================================
+
+volumes:
+  db-data:
+    driver: local
+  elasticsearch-data:
+    driver: local
+  pgadmin-data:
+    driver: local
+  ollama-models:
+    driver: local
+
+# =============================================================================
+# Networks
+# =============================================================================
+
+networks:
+  backend:
+    driver: bridge
